@@ -59,18 +59,26 @@ docker compose up -d
 # 2. Instalar dependências
 pnpm install
 
-# 3. Gerar Prisma Client e criar tabelas (migrations versionadas)
+# 3. Criar os arquivos .env a partir dos exemplos
+cp packages/db/.env.example    packages/db/.env
+cp apps/web/.env.example       apps/web/.env
+cp apps/bot-worker/.env.example apps/bot-worker/.env
+# (no Windows PowerShell, use Copy-Item no lugar de cp)
+
+# 4. Gerar Prisma Client e criar tabelas (migrations versionadas)
 pnpm --filter @streamloyal/db exec prisma generate
 pnpm --filter @streamloyal/db exec prisma migrate deploy
 
-# 4. Configurar OAuth (pode configurar só a plataforma que for usar)
+# 5. Configurar OAuth (pode configurar só a plataforma que for usar)
 #    Google/YouTube: docs/google-oauth.md
 #    Twitch:         docs/twitch-oauth.md
-#    Preencha as variáveis em:
-#        apps/web/.env
-#        apps/bot-worker/.env
+#    Preencha as credenciais em apps/web/.env e apps/bot-worker/.env
+#    Gere também:
+#      AUTH_SECRET            -> npx auth secret  (ou 32+ caracteres aleatórios)
+#      TOKEN_ENCRYPTION_KEY   -> 64 caracteres hex (32 bytes), a MESMA nos dois .env
+#        node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 
-# 5. Rodar
+# 6. Rodar
 pnpm --filter web dev          # http://localhost:3000
 pnpm --filter bot-worker dev   # worker (outro terminal)
 
@@ -80,8 +88,6 @@ pnpm typecheck
 pnpm lint
 pnpm build
 ```
-
-Arquivos de exemplo: `apps/web/.env.example` e `apps/bot-worker/.env.example`.
 
 ## Como os pontos funcionam
 
