@@ -1,4 +1,5 @@
 import { prisma, Platform } from "@streamloyal/db";
+import { applyPendingImport } from "@streamloyal/core";
 import { auth } from "@/lib/auth";
 
 /**
@@ -22,14 +23,27 @@ export async function getOrCreateMyViewerProfile(
     (platform === "TWITCH" ? user.twitchUserId : user.ytChannelId) ??
     `site:${user.id}`;
 
-  return prisma.viewerProfile.upsert({
+  const displayName = user.name ?? "Espectador";
+  const existing = await prisma.viewerProfile.findUnique({
     where: { channelId_platformUserId: { channelId, platformUserId } },
-    create: {
+    select: { id: true },
+  });
+  if (existing) {
+    return prisma.viewerProfile.update({
+      where: { id: existing.id },
+      data: { lastSeenAt: new Date() },
+    });
+  }
+
+  const created = await prisma.viewerProfile.create({
+    data: {
       channelId,
       platformUserId,
-      displayName: user.name ?? "Espectador",
+      displayName,
       avatarUrl: user.image,
     },
-    update: { lastSeenAt: new Date() },
   });
+  // Espectador novo pela loja/site: aplica pontos importados pendentes por nome.
+  const applied = await applyPendingImport(channelId, created.id, displayName);
+  return applied ?? created;
 }

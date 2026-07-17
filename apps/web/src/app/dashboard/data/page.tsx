@@ -1,7 +1,9 @@
 import { redirect } from "next/navigation";
 import { z } from "zod";
 import { prisma } from "@streamloyal/db";
+import { awardPoints, ensureViewer } from "@streamloyal/core";
 import { requireMyChannel } from "@/lib/channel";
+import { getTwitchAccessToken, fetchTwitchUsersByLogin } from "@/lib/twitch";
 
 const commandSchema = z.object({
   name: z.string().min(1).max(50),
@@ -310,12 +312,109 @@ async function importCsv(formData: FormData) {
   redirect("/dashboard/data?ok=1");
 }
 
+const NAME_KEYS = ["username", "user", "name", "viewer", "login", "usuário", "nome"];
+const POINTS_KEYS = ["points", "currency", "amount", "balance", "value", "pontos", "saldo"];
+
+function pickColumn(row: Record<string, string>, candidates: string[]) {
+  const entries = Object.entries(row);
+  for (const key of candidates) {
+    const found = entries.find(([header]) => header.trim().toLowerCase() === key);
+    if (found) return found[1];
+  }
+  return undefined;
+}
+
+function toPoints(raw: string | undefined) {
+  if (!raw) return 0;
+  const cleaned = raw.replace(/[^\d-]/g, "");
+  const value = parseInt(cleaned, 10);
+  if (!Number.isFinite(value) || value <= 0) return 0;
+  return Math.min(value, 1_000_000_000);
+}
+
+async function importStreamlabs(formData: FormData) {
+  "use server";
+  const channel = await requireMyChannel();
+  const file = formData.get("file");
+  if (!(file instanceof File) || file.size === 0 || file.size > 5_000_000) {
+    redirect("/dashboard/data?error=arquivo");
+  }
+
+  const rows = parseCsv(await file.text());
+  if (rows.length === 0 || rows.length > 100_000) {
+    redirect("/dashboard/data?error=formato");
+  }
+
+  // Consolida por nome (última linha vence) e descarta pontos inválidos.
+  const byName = new Map<string, { display: string; points: number }>();
+  for (const row of rows) {
+    const display = (pickColumn(row, NAME_KEYS) ?? "").trim();
+    const points = toPoints(pickColumn(row, POINTS_KEYS));
+    if (!display || points <= 0) continue;
+    byName.set(display.toLowerCase(), { display, points });
+  }
+  if (byName.size === 0) redirect("/dashboard/data?error=formato");
+
+  let imported = 0;
+  let pending = 0;
+
+  // Twitch: resolve login → user id e credita direto; o que não resolver fica pendente.
+  const resolved =
+    channel.platform === "TWITCH"
+      ? await (async () => {
+          const token = await getTwitchAccessToken(channel.ownerId);
+          if (!token) return new Map();
+          return fetchTwitchUsersByLogin(token, [...byName.keys()]);
+        })()
+      : new Map();
+
+  for (const [nameKey, { display, points }] of byName) {
+    const match = channel.platform === "TWITCH" ? resolved.get(nameKey) : undefined;
+    if (match) {
+      const viewer = await ensureViewer({
+        channelId: channel.id,
+        platformUserId: match.id,
+        displayName: match.displayName ?? display,
+        avatarUrl: match.avatarUrl ?? null,
+      });
+      await awardPoints({
+        channelId: channel.id,
+        viewerId: viewer.id,
+        delta: points,
+        reason: "MANUAL",
+        note: "Importado do Streamlabs",
+        idempotencyKey: `import:streamlabs:${channel.id}:${match.id}`,
+      });
+      imported += 1;
+    } else {
+      await prisma.pendingPointsImport.upsert({
+        where: { channelId_nameKey: { channelId: channel.id, nameKey } },
+        create: {
+          channelId: channel.id,
+          nameKey,
+          points,
+          source: "streamlabs",
+        },
+        update: { points },
+      });
+      pending += 1;
+    }
+  }
+
+  redirect(`/dashboard/data?imported=${imported}&pending=${pending}`);
+}
+
 export default async function DataPage({
   searchParams,
 }: {
-  searchParams: Promise<{ ok?: string; error?: string }>;
+  searchParams: Promise<{
+    ok?: string;
+    error?: string;
+    imported?: string;
+    pending?: string;
+  }>;
 }) {
-  await requireMyChannel();
+  const channel = await requireMyChannel();
   const query = await searchParams;
   const exports = [
     ["Comandos", "commands"],
@@ -335,6 +434,19 @@ export default async function DataPage({
       {query.ok && (
         <p className="rounded-xl border border-emerald-800 bg-emerald-950/30 p-3 text-sm text-emerald-300">
           Backup importado com sucesso.
+        </p>
+      )}
+      {query.imported !== undefined && (
+        <p className="rounded-xl border border-emerald-800 bg-emerald-950/30 p-3 text-sm text-emerald-300">
+          Importação concluída: {query.imported} espectador(es) creditado(s) agora
+          {Number(query.pending) > 0 && (
+            <>
+              {" "}
+              e {query.pending} pendente(s) — esses pontos entram automaticamente
+              quando cada pessoa aparecer no chat ou na sua página.
+            </>
+          )}
+          .
         </p>
       )}
       {query.error && (
@@ -379,6 +491,40 @@ export default async function DataPage({
           />
           <button className="rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium hover:bg-violet-500">
             Importar
+          </button>
+        </form>
+      </section>
+      <section className="rounded-2xl border border-zinc-800 bg-zinc-900/50 p-6">
+        <h2 className="mb-2 text-lg font-semibold text-violet-300">
+          Importar do Streamlabs
+        </h2>
+        <p className="mb-4 text-sm text-zinc-400">
+          Migre os pontos sem perder nada. Exporte a lista de moeda/pontos do
+          Streamlabs em CSV (uma coluna com o nome/login e outra com os pontos) e
+          envie aqui. Reenviar o mesmo arquivo não duplica pontos.
+          {channel.platform === "TWITCH" ? (
+            <>
+              {" "}
+              Na Twitch os usuários são casados automaticamente pelo login.
+            </>
+          ) : (
+            <>
+              {" "}
+              No YouTube o nome não é único, então os pontos ficam pendentes e são
+              creditados quando cada pessoa aparecer no chat ou na sua página.
+            </>
+          )}
+        </p>
+        <form action={importStreamlabs} className="flex flex-wrap items-center gap-4">
+          <input
+            type="file"
+            name="file"
+            required
+            accept="text/csv,.csv"
+            className="block w-full max-w-md rounded-lg border border-zinc-700 bg-zinc-900 p-3 text-sm"
+          />
+          <button className="rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium hover:bg-violet-500">
+            Importar pontos
           </button>
         </form>
       </section>

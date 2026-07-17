@@ -8,7 +8,9 @@ Lógica independente de plataforma consumida por `apps/web` e `apps/bot-worker`
 ## Módulos
 
 - `points.ts` — `awardPoints` (delta + ledger, atômico, idempotente),
-  `transferPoints` (débito condicional + crédito na mesma transação), `ensureViewer`.
+  `transferPoints` (débito condicional + crédito na mesma transação), `ensureViewer`
+  (ao criar um espectador novo, aplica pontos importados pendentes por nome) e
+  `applyPendingImport` (credita `PendingPointsImport` via ledger, idempotente).
 - `redeem.ts` — `redeemItem` (valida bloqueio/saldo/estoque/cooldowns; claim condicional
   de código; aborta via `RedeemAbort` para reverter escritas parciais) e `refundRedemption`.
 - `engagement.ts` — jogos de azar (`playChanceGame`, `resolveChanceGame`), duelo,

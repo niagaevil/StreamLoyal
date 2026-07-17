@@ -122,14 +122,31 @@ export interface EnsureViewerInput {
 
 /** Cria ou atualiza o perfil do espectador no canal. */
 export async function ensureViewer(input: EnsureViewerInput) {
-  return prisma.viewerProfile.upsert({
+  const existing = await prisma.viewerProfile.findUnique({
     where: {
       channelId_platformUserId: {
         channelId: input.channelId,
         platformUserId: input.platformUserId,
       },
     },
-    create: {
+    select: { id: true },
+  });
+
+  if (existing) {
+    return prisma.viewerProfile.update({
+      where: { id: existing.id },
+      data: {
+        displayName: input.displayName,
+        avatarUrl: input.avatarUrl ?? undefined,
+        isModerator: input.isModerator ?? undefined,
+        isMember: input.isMember ?? undefined,
+        lastSeenAt: new Date(),
+      },
+    });
+  }
+
+  const created = await prisma.viewerProfile.create({
+    data: {
       channelId: input.channelId,
       platformUserId: input.platformUserId,
       displayName: input.displayName,
@@ -137,12 +154,47 @@ export async function ensureViewer(input: EnsureViewerInput) {
       isModerator: input.isModerator ?? false,
       isMember: input.isMember ?? false,
     },
-    update: {
-      displayName: input.displayName,
-      avatarUrl: input.avatarUrl ?? undefined,
-      isModerator: input.isModerator ?? undefined,
-      isMember: input.isMember ?? undefined,
-      lastSeenAt: new Date(),
-    },
   });
+
+  // Espectador novo: aplica pontos importados de outra plataforma que estavam
+  // aguardando esse nome aparecer (ex.: migração do Streamlabs).
+  const applied = await applyPendingImport(
+    input.channelId,
+    created.id,
+    input.displayName
+  );
+  return applied ?? created;
+}
+
+/**
+ * Se houver pontos importados pendentes para o nome informado, credita-os via
+ * ledger (idempotente) e remove a pendência. Retorna o perfil atualizado ou null.
+ */
+export async function applyPendingImport(
+  channelId: string,
+  viewerId: string,
+  displayName: string
+) {
+  const nameKey = displayName.trim().toLowerCase();
+  if (!nameKey) return null;
+  const pending = await prisma.pendingPointsImport.findUnique({
+    where: { channelId_nameKey: { channelId, nameKey } },
+  });
+  if (!pending) return null;
+
+  if (pending.points > 0) {
+    await awardPoints({
+      channelId,
+      viewerId,
+      delta: pending.points,
+      reason: "MANUAL",
+      note: `Importado do ${pending.source}`,
+      idempotencyKey: `import:${pending.source}:${channelId}:${nameKey}`,
+    });
+  }
+  await prisma.pendingPointsImport
+    .delete({ where: { id: pending.id } })
+    .catch(() => undefined);
+
+  return prisma.viewerProfile.findUnique({ where: { id: viewerId } });
 }

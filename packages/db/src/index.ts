@@ -31,6 +31,7 @@ export type {
   LoyaltySettings,
   ViewerProfile,
   PointLedger,
+  PendingPointsImport,
   StoreTheme,
   StoreCategory,
   StoreItem,

@@ -98,3 +98,54 @@ export async function fetchMyTwitchUser(
     avatarUrl: u.profile_image_url,
   };
 }
+
+export interface ResolvedTwitchUser {
+  id: string;
+  login: string;
+  displayName: string;
+  avatarUrl?: string;
+}
+
+/**
+ * Resolve uma lista de logins Twitch para seus IDs (Helix aceita até 100 por
+ * chamada). Retorna um mapa login(minúsculo) → usuário. Logins inexistentes
+ * simplesmente não aparecem no mapa.
+ */
+export async function fetchTwitchUsersByLogin(
+  accessToken: string,
+  logins: string[]
+): Promise<Map<string, ResolvedTwitchUser>> {
+  const result = new Map<string, ResolvedTwitchUser>();
+  const unique = [
+    ...new Set(logins.map((l) => l.trim().toLowerCase()).filter(Boolean)),
+  ];
+  for (let i = 0; i < unique.length; i += 100) {
+    const batch = unique.slice(i, i + 100);
+    const params = new URLSearchParams();
+    for (const login of batch) params.append("login", login);
+    const res = await fetch(`https://api.twitch.tv/helix/users?${params}`, {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Client-Id": process.env.AUTH_TWITCH_ID!,
+      },
+    });
+    if (!res.ok) continue;
+    const data = (await res.json()) as {
+      data?: {
+        id: string;
+        login: string;
+        display_name: string;
+        profile_image_url?: string;
+      }[];
+    };
+    for (const u of data.data ?? []) {
+      result.set(u.login.toLowerCase(), {
+        id: u.id,
+        login: u.login,
+        displayName: u.display_name,
+        avatarUrl: u.profile_image_url,
+      });
+    }
+  }
+  return result;
+}

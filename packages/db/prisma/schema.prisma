@@ -112,6 +112,7 @@ model Channel {
   counters        ChatCounter[]
   commandLogs     CommandLog[]
   engagementSettings EngagementSettings?
+  pendingImports  PendingPointsImport[]
 
   // Fila de espectadores (!join)
   queueOpen Boolean @default(false)
@@ -241,6 +242,23 @@ model PointLedger {
 
   @@index([channelId, createdAt])
   @@index([viewerId, createdAt])
+}
+
+// Pontos importados de outra plataforma (ex.: Streamlabs) que ainda não puderam
+// ser vinculados a um platformUserId. A chave é o nome/login em minúsculas;
+// quando o espectador aparece (chat ou loja), os pontos são aplicados via ledger.
+model PendingPointsImport {
+  id        String   @id @default(cuid())
+  channelId String
+  // displayName/login normalizado (trim + lowercase)
+  nameKey   String
+  points    Int
+  source    String   @default("streamlabs")
+  createdAt DateTime @default(now())
+
+  channel Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+
+  @@unique([channelId, nameKey])
 }
 
 // ---------- Loja ----------

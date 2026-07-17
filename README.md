@@ -16,7 +16,7 @@ Plataforma gratuita de **pontos de fidelidade** e **loja de recompensas** para s
   - **Engajamento** — sorteios, enquetes, apostas e minigames
   - **OBS & Mídia** — alertas, sons e Media Share com URLs privadas
   - **Conta do bot** — canal YouTube separado e gratuito
-  - **Importar/Exportar** — backup JSON e CSV
+  - **Importar/Exportar** — backup JSON e CSV + migração de pontos do Streamlabs
   - **Espectadores** — ranking, ajuste manual, bloqueio
   - **Resgates** — aprovar / reembolsar
   - **Aparência** — cores, layout, banner, logo
@@ -101,6 +101,34 @@ pnpm build
 No YouTube, assistir em silêncio **no player nativo** não gera pontos — a API
 não lista espectadores; use a aba Assistir da página pública. Na Twitch isso
 não é necessário: quem está conectado ao chat (mesmo calado) já pontua.
+
+## Migração do Streamlabs
+
+Dá para trazer os pontos do Streamlabs sem perder nada, em
+**Painel → Importar/Exportar → Importar do Streamlabs**:
+
+1. Exporte a lista de moeda/pontos do Streamlabs em CSV (uma coluna com o
+   nome/login e outra com os pontos — os cabeçalhos são detectados
+   automaticamente: `username`, `name`, `login`, `points`, `currency`, etc.).
+2. Envie o arquivo no painel. Reenviar o mesmo CSV **não duplica pontos**
+   (cada crédito usa chave de idempotência no ledger).
+
+O comportamento muda por plataforma, porque o Streamlabs identifica as pessoas
+por **nome** e o StreamLoyal por **ID da plataforma**:
+
+- **Twitch** — o login é único, então os usuários são resolvidos na hora pela
+  API Helix e os pontos são creditados imediatamente. Logins que não existirem
+  mais ficam como pendentes.
+- **YouTube** — o nome de exibição **não é único nem estável**, então não dá
+  para casar com segurança no momento do upload. Os pontos ficam guardados como
+  **pendências por nome** (tabela `PendingPointsImport`) e são creditados
+  automaticamente quando a pessoa aparece pela primeira vez: ao mandar mensagem
+  no chat da live (o worker cria o perfil e reconcilia pelo nome) ou ao fazer
+  login na página pública do canal. Ou seja, ninguém perde saldo — ele só entra
+  quando o espectador volta a interagir.
+
+Todo crédito de migração passa pelo `PointLedger` com motivo `MANUAL` e nota
+"Importado do Streamlabs", então fica auditável no histórico.
 
 ## Estrutura
 
