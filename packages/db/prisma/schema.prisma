@@ -1,0 +1,803 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Platform {
+  YOUTUBE
+  TWITCH
+}
+
+// ---------- Auth (Auth.js / NextAuth) ----------
+
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String?   @unique
+  emailVerified DateTime?
+  image         String?
+  // Identidades de espectador por plataforma (vinculam pontos ganhos no chat)
+  ytChannelId   String?   @unique
+  twitchUserId  String?   @unique
+  twitchLogin   String?
+
+  accounts Account[]
+  sessions Session[]
+  channel  Channel?
+  watchSessions WatchSession[]
+
+  createdAt DateTime @default(now())
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// ---------- Canal do streamer ----------
+
+model Channel {
+  id       String   @id @default(cuid())
+  ownerId  String   @unique
+  platform Platform @default(YOUTUBE)
+  // ID do canal na plataforma (YouTube channelId ou Twitch user id)
+  platformChannelId String
+  // Login/handle na plataforma (ex.: login da Twitch, usado em embeds e links)
+  platformLogin     String?
+  slug        String  @unique
+  title       String
+  description String?
+  avatarUrl   String?
+
+  owner           User             @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  loyaltySettings LoyaltySettings?
+  storeTheme      StoreTheme?
+  categories      StoreCategory[]
+  items           StoreItem[]
+  viewers         ViewerProfile[]
+  ledger          PointLedger[]
+  redemptions     Redemption[]
+  watchSessions   WatchSession[]
+  liveStreams     LiveStream[]
+  blockedUsers    BlockedUser[]
+  commands        ChatCommand[]
+  timers          ChatTimer[]
+  quotes          Quote[]
+  queueEntries    QueueEntry[]
+  moderationSettings ModerationSettings?
+  moderationLogs  ModerationLog[]
+  giveaways      Giveaway[]
+  polls           Poll[]
+  bettingRounds   BettingRound[]
+  overlayAccesses OverlayAccess[]
+  alertSettings   AlertSettings?
+  alertEvents     AlertEvent[]
+  mediaSettings   MediaSettings?
+  mediaQueue      MediaQueueItem[]
+  botConnection   BotConnection?
+  counters        ChatCounter[]
+  commandLogs     CommandLog[]
+  engagementSettings EngagementSettings?
+
+  // Fila de espectadores (!join)
+  queueOpen Boolean @default(false)
+
+  createdAt DateTime @default(now())
+
+  @@unique([platform, platformChannelId])
+}
+
+model LoyaltySettings {
+  id        String  @id @default(cuid())
+  channelId String  @unique
+  channel   Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+
+  enabled          Boolean @default(true)
+  currencyName     String  @default("pontos")
+  payoutIntervalMin Int    @default(10)
+  // pontos para quem interagiu no chat na janela
+  pointsPerIntervalActive Int @default(10)
+  // Watch & Earn (player embutido no site)
+  watchEarnEnabled        Boolean @default(true)
+  pointsPerIntervalWatch  Int     @default(10)
+  maxWatchPointsPerStream Int     @default(500)
+  // bônus de eventos (YouTube)
+  memberMultiplier       Float @default(1.5)
+  pointsOnNewMember      Int   @default(300)
+  pointsPerSuperChatUnit Int   @default(50)
+  pointsOnSuperSticker   Int   @default(100)
+  pointsOnGiftGiver      Int   @default(200)
+  pointsOnGiftReceiver   Int   @default(100)
+  // Twitch: lurkers detectados via Get Chatters ganham sem falar no chat
+  pointsPerIntervalLurker Int @default(5)
+  // bônus de eventos (Twitch)
+  pointsOnFollow   Int @default(100)
+  pointsOnSub      Int @default(300)
+  pointsPerBits100 Int @default(50)
+  pointsOnRaid     Int @default(200)
+}
+
+model BlockedUser {
+  id             String  @id @default(cuid())
+  channelId      String
+  // ID do usuário na plataforma do canal (YouTube channelId / Twitch user id)
+  platformUserId String
+  note           String?
+  channel        Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+
+  @@unique([channelId, platformUserId])
+}
+
+// ---------- Espectadores e pontos ----------
+
+model ViewerProfile {
+  id        String @id @default(cuid())
+  channelId String
+  // ID do usuário na plataforma do canal (YouTube channelId / Twitch user id)
+  platformUserId String
+  displayName String
+  avatarUrl   String?
+  isModerator Boolean @default(false)
+  // Membro (YouTube) ou sub (Twitch)
+  isMember Boolean @default(false)
+
+  points        Int      @default(0)
+  activeMinutes Int      @default(0)
+  watchMinutes  Int      @default(0)
+  lastSeenAt    DateTime @default(now())
+
+  channel     Channel       @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  ledger      PointLedger[]
+  redemptions Redemption[]
+  watchSessions WatchSession[]
+  queueEntries  QueueEntry[]
+  giveawayEntries GiveawayEntry[]
+  giveawayWins    Giveaway[] @relation("GiveawayWinner")
+  pollVotes        PollVote[]
+  bets             Bet[]
+  mediaRequests    MediaQueueItem[]
+  mediaSkipVotes   MediaSkipVote[]
+
+  @@unique([channelId, platformUserId])
+  @@index([channelId, points])
+}
+
+enum LedgerReason {
+  CHAT_ACTIVITY
+  LURK_TIME
+  GIVE
+  COMMAND_COST
+  WATCH_TIME
+  NEW_MEMBER
+  MEMBER_MILESTONE
+  SUPER_CHAT
+  SUPER_STICKER
+  GIFT_GIVEN
+  GIFT_RECEIVED
+  FOLLOW
+  SUBSCRIPTION
+  BITS
+  RAID
+  MANUAL
+  REDEEM
+  REFUND
+  GAMBLE
+  SLOTS
+  DUEL
+  HEIST
+  GIVEAWAY
+  BET
+  BET_PAYOUT
+  MEDIA_SHARE
+}
+
+model PointLedger {
+  id             String        @id @default(cuid())
+  channelId      String
+  viewerId       String
+  delta          Int
+  reason         LedgerReason
+  refId          String?
+  idempotencyKey String?       @unique
+  note           String?
+  createdAt      DateTime      @default(now())
+
+  channel Channel       @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  viewer  ViewerProfile @relation(fields: [viewerId], references: [id], onDelete: Cascade)
+
+  @@index([channelId, createdAt])
+  @@index([viewerId, createdAt])
+}
+
+// ---------- Loja ----------
+
+model StoreTheme {
+  id        String  @id @default(cuid())
+  channelId String  @unique
+  channel   Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+
+  accentColor   String  @default("#7c3aed")
+  darkMode      Boolean @default(true)
+  layout        String  @default("grid") // grid | list | compact
+  bannerUrl     String?
+  logoUrl       String?
+  backgroundUrl String?
+  headline      String?
+  about         String?
+  socialLinks   Json?
+}
+
+model StoreCategory {
+  id        String  @id @default(cuid())
+  channelId String
+  name      String
+  sortOrder Int     @default(0)
+  visible   Boolean @default(true)
+
+  channel Channel     @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  items   StoreItem[]
+
+  @@index([channelId, sortOrder])
+}
+
+enum ItemType {
+  PERK
+  SOUND
+  CODE
+}
+
+model StoreItem {
+  id          String   @id @default(cuid())
+  channelId   String
+  categoryId  String?
+  name        String
+  description String?
+  type        ItemType @default(PERK)
+  cost        Int
+  stock       Int? // null = ilimitado
+  globalCooldownSec Int @default(0)
+  userCooldownSec   Int @default(0)
+  imageUrl    String?
+  soundUrl    String?
+  isFeatured  Boolean @default(false)
+  isActive    Boolean @default(true)
+  sortOrder   Int     @default(0)
+
+  channel     Channel        @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  category    StoreCategory? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  codes       AccessCode[]
+  redemptions Redemption[]
+
+  @@index([channelId, sortOrder])
+}
+
+model AccessCode {
+  id         String    @id @default(cuid())
+  itemId     String
+  code       String
+  redeemedAt DateTime?
+
+  item       StoreItem   @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  redemption Redemption?
+}
+
+enum RedemptionStatus {
+  PENDING
+  APPROVED
+  CANCELLED
+  REFUNDED
+}
+
+model Redemption {
+  id        String           @id @default(cuid())
+  channelId String
+  itemId    String
+  viewerId  String
+  cost      Int
+  status    RedemptionStatus @default(PENDING)
+  note      String?
+  codeId    String?          @unique
+  createdAt DateTime         @default(now())
+  updatedAt DateTime         @updatedAt
+
+  channel Channel       @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  item    StoreItem     @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  viewer  ViewerProfile @relation(fields: [viewerId], references: [id], onDelete: Cascade)
+  code    AccessCode?   @relation(fields: [codeId], references: [id])
+
+  @@index([channelId, createdAt])
+}
+
+// ---------- Live e Watch & Earn ----------
+
+enum LiveStatus {
+  LIVE
+  ENDED
+}
+
+model LiveStream {
+  id        String @id @default(cuid())
+  channelId String
+  // ID externo da transmissão (videoId no YouTube / stream id na Twitch)
+  videoId    String
+  // Só YouTube (id do chat da live)
+  liveChatId String?
+  status     LiveStatus @default(LIVE)
+  startedAt  DateTime   @default(now())
+  endedAt    DateTime?
+
+  channel Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+
+  @@unique([channelId, videoId])
+  @@index([channelId, status])
+}
+
+// ---------- Bot: comandos, timers, quotes, fila e moderação ----------
+
+enum CommandPermission {
+  EVERYONE
+  MODERATOR
+}
+
+model ChatCommand {
+  id        String   @id @default(cuid())
+  channelId String
+  // Nome sem "!" (ex.: "discord")
+  name       String
+  aliases    String[] @default([])
+  response   String
+  permission CommandPermission @default(EVERYONE)
+  costPoints Int     @default(0)
+  globalCooldownSec Int @default(5)
+  userCooldownSec   Int @default(15)
+  enabled    Boolean @default(true)
+
+  channel Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+
+  @@unique([channelId, name])
+}
+
+model ChatTimer {
+  id        String  @id @default(cuid())
+  channelId String
+  name      String
+  message   String
+  intervalMin  Int     @default(15)
+  minChatLines Int     @default(5)
+  enabled      Boolean @default(true)
+
+  channel Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+}
+
+model ChatCounter {
+  id        String @id @default(cuid())
+  channelId String
+  name      String
+  value     Int    @default(0)
+
+  channel Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+
+  @@unique([channelId, name])
+}
+
+model CommandLog {
+  id             String   @id @default(cuid())
+  channelId      String
+  platformUserId String
+  displayName    String
+  command        String
+  args           String?
+  createdAt      DateTime @default(now())
+
+  channel Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+
+  @@index([channelId, createdAt])
+  @@index([channelId, command])
+}
+
+model Quote {
+  id        String   @id @default(cuid())
+  channelId String
+  // Número sequencial dentro do canal (!quote 3)
+  number    Int
+  text      String
+  addedBy   String?
+  createdAt DateTime @default(now())
+
+  channel Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+
+  @@unique([channelId, number])
+}
+
+model QueueEntry {
+  id        String   @id @default(cuid())
+  channelId String
+  viewerId  String
+  joinedAt  DateTime @default(now())
+
+  channel Channel       @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  viewer  ViewerProfile @relation(fields: [viewerId], references: [id], onDelete: Cascade)
+
+  @@unique([channelId, viewerId])
+  @@index([channelId, joinedAt])
+}
+
+enum ModPunishment {
+  DELETE
+  TIMEOUT
+}
+
+model ModerationSettings {
+  id        String  @id @default(cuid())
+  channelId String  @unique
+  channel   Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+
+  enabled     Boolean       @default(false)
+  punishment  ModPunishment @default(DELETE)
+  timeoutSec  Int           @default(60)
+  sendWarning Boolean       @default(true)
+  // Membros/subs ficam isentos dos filtros
+  exemptMembers Boolean @default(false)
+
+  capsEnabled    Boolean @default(false)
+  capsMinLen     Int     @default(10)
+  capsMaxPercent Int     @default(70)
+
+  linksEnabled  Boolean  @default(false)
+  linkWhitelist String[] @default([])
+
+  wordsEnabled Boolean  @default(false)
+  bannedWords  String[] @default([])
+
+  symbolsEnabled    Boolean @default(false)
+  symbolsMaxPercent Int     @default(50)
+
+  repetitionEnabled Boolean @default(false)
+  maxRepeatedChars  Int     @default(8)
+  linesEnabled      Boolean @default(false)
+  maxLines          Int     @default(5)
+  zalgoEnabled      Boolean @default(false)
+  maxCombiningMarks Int     @default(8)
+  emotesEnabled     Boolean @default(false)
+  maxEmotes         Int     @default(10)
+  regexEnabled      Boolean  @default(false)
+  bannedPatterns    String[] @default([])
+}
+
+model ModerationLog {
+  id             String   @id @default(cuid())
+  channelId      String
+  platformUserId String
+  displayName    String
+  // Filtro que disparou (caps, links, words, symbols)
+  filter    String
+  action    String
+  message   String
+  createdAt DateTime @default(now())
+
+  channel Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+
+  @@index([channelId, createdAt])
+}
+
+// ---------- Engajamento, jogos e OBS ----------
+
+enum EngagementStatus {
+  OPEN
+  CLOSED
+  CANCELLED
+}
+
+model EngagementSettings {
+  id        String  @id @default(cuid())
+  channelId String  @unique
+  gamesEnabled Boolean @default(true)
+  maxWager     Int     @default(10000)
+  gameCooldownSec Int  @default(10)
+  giveawaysEnabled Boolean @default(true)
+  pollsEnabled     Boolean @default(true)
+  bettingEnabled   Boolean @default(true)
+
+  channel Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+}
+
+model Giveaway {
+  id          String           @id @default(cuid())
+  channelId   String
+  title       String
+  keyword     String           @default("sorteio")
+  ticketCost  Int              @default(0)
+  maxTickets  Int              @default(1)
+  memberWeight Int             @default(1)
+  status      EngagementStatus @default(OPEN)
+  winnerId    String?
+  createdAt   DateTime         @default(now())
+  endedAt     DateTime?
+
+  channel Channel           @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  winner  ViewerProfile?    @relation("GiveawayWinner", fields: [winnerId], references: [id], onDelete: SetNull)
+  entries GiveawayEntry[]
+
+  @@index([channelId, status])
+}
+
+model GiveawayEntry {
+  id         String   @id @default(cuid())
+  giveawayId String
+  viewerId   String
+  tickets    Int      @default(1)
+  weight     Int      @default(1)
+  createdAt  DateTime @default(now())
+
+  giveaway Giveaway     @relation(fields: [giveawayId], references: [id], onDelete: Cascade)
+  viewer   ViewerProfile @relation(fields: [viewerId], references: [id], onDelete: Cascade)
+
+  @@unique([giveawayId, viewerId])
+}
+
+model Poll {
+  id        String           @id @default(cuid())
+  channelId String
+  question  String
+  status    EngagementStatus @default(OPEN)
+  createdAt DateTime         @default(now())
+  endedAt   DateTime?
+
+  channel Channel      @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  options PollOption[]
+  votes   PollVote[]
+
+  @@index([channelId, status])
+}
+
+model PollOption {
+  id      String @id @default(cuid())
+  pollId  String
+  label   String
+  number  Int
+
+  poll  Poll       @relation(fields: [pollId], references: [id], onDelete: Cascade)
+  votes PollVote[]
+
+  @@unique([pollId, number])
+}
+
+model PollVote {
+  id       String @id @default(cuid())
+  pollId   String
+  optionId String
+  viewerId String
+
+  poll   Poll          @relation(fields: [pollId], references: [id], onDelete: Cascade)
+  option PollOption    @relation(fields: [optionId], references: [id], onDelete: Cascade)
+  viewer ViewerProfile @relation(fields: [viewerId], references: [id], onDelete: Cascade)
+
+  @@unique([pollId, viewerId])
+}
+
+model BettingRound {
+  id        String           @id @default(cuid())
+  channelId String
+  title     String
+  status    EngagementStatus @default(OPEN)
+  winnerOptionId String?
+  createdAt DateTime         @default(now())
+  endedAt   DateTime?
+
+  channel Channel         @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  options BettingOption[]
+  bets    Bet[]
+
+  @@index([channelId, status])
+}
+
+model BettingOption {
+  id      String @id @default(cuid())
+  roundId String
+  label   String
+  number  Int
+
+  round BettingRound @relation(fields: [roundId], references: [id], onDelete: Cascade)
+  bets  Bet[]
+
+  @@unique([roundId, number])
+}
+
+model Bet {
+  id       String @id @default(cuid())
+  roundId  String
+  optionId String
+  viewerId String
+  amount   Int
+
+  round  BettingRound  @relation(fields: [roundId], references: [id], onDelete: Cascade)
+  option BettingOption @relation(fields: [optionId], references: [id], onDelete: Cascade)
+  viewer ViewerProfile @relation(fields: [viewerId], references: [id], onDelete: Cascade)
+
+  @@unique([roundId, viewerId])
+}
+
+enum OverlayKind {
+  ALERTS
+  MEDIA
+}
+
+model OverlayAccess {
+  id        String      @id @default(cuid())
+  channelId String
+  kind      OverlayKind
+  tokenHash String      @unique
+  revokedAt DateTime?
+  createdAt DateTime    @default(now())
+
+  channel Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+
+  @@index([channelId, kind])
+}
+
+model AlertSettings {
+  id        String  @id @default(cuid())
+  channelId String  @unique
+  enabled   Boolean @default(true)
+  durationSec Int   @default(7)
+  volume    Int     @default(80)
+  accentColor String @default("#7c3aed")
+  template  String  @default("{message}")
+  soundUrl  String?
+  followsEnabled     Boolean @default(true)
+  membershipsEnabled Boolean @default(true)
+  paidEnabled        Boolean @default(true)
+  raidsEnabled       Boolean @default(true)
+  redemptionsEnabled Boolean @default(true)
+
+  channel Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+}
+
+model AlertEvent {
+  id        String   @id @default(cuid())
+  channelId String
+  type      String
+  userName  String?
+  message   String
+  amount    Int?
+  imageUrl  String?
+  soundUrl  String?
+  sourceKey String?
+  createdAt DateTime @default(now())
+
+  channel Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+
+  @@index([channelId, createdAt])
+  @@index([sourceKey])
+}
+
+model MediaSettings {
+  id        String  @id @default(cuid())
+  channelId String  @unique
+  enabled   Boolean @default(false)
+  cost      Int     @default(100)
+  maxDurationSec Int @default(120)
+  maxQueueSize Int    @default(25)
+  volume    Int     @default(70)
+  votesToSkip Int   @default(3)
+  blacklist String[] @default([])
+
+  channel Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+}
+
+enum MediaStatus {
+  PENDING
+  PLAYING
+  PLAYED
+  SKIPPED
+  REJECTED
+}
+
+model MediaQueueItem {
+  id        String      @id @default(cuid())
+  channelId String
+  viewerId  String?
+  url       String
+  videoId   String
+  title     String?
+  durationSec Int?
+  cost      Int
+  status    MediaStatus @default(PENDING)
+  skipVotes Int         @default(0)
+  createdAt DateTime    @default(now())
+  playedAt  DateTime?
+
+  channel Channel        @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  viewer  ViewerProfile? @relation(fields: [viewerId], references: [id], onDelete: SetNull)
+  votes   MediaSkipVote[]
+
+  @@index([channelId, status, createdAt])
+}
+
+model MediaSkipVote {
+  id       String @id @default(cuid())
+  itemId   String
+  viewerId String
+
+  item   MediaQueueItem @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  viewer ViewerProfile @relation(fields: [viewerId], references: [id], onDelete: Cascade)
+
+  @@unique([itemId, viewerId])
+}
+
+model BotConnection {
+  id             String   @id @default(cuid())
+  channelId      String   @unique
+  platform       Platform @default(YOUTUBE)
+  platformUserId String
+  displayName    String
+  accessToken    String
+  refreshToken   String?
+  expiresAt      Int?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  channel Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+}
+
+// Lease distribuído: garante que só uma réplica do worker processa cada canal
+model WorkerLease {
+  channelId String   @id
+  holderId  String
+  expiresAt DateTime
+  updatedAt DateTime @updatedAt
+}
+
+model WatchSession {
+  id              String    @id @default(cuid())
+  channelId       String
+  userId          String
+  viewerId        String?
+  videoId         String
+  startedAt       DateTime  @default(now())
+  lastHeartbeatAt DateTime  @default(now())
+  validSeconds    Int       @default(0)
+  creditedSeconds Int       @default(0)
+  pointsAwarded   Int       @default(0)
+  endedAt         DateTime?
+
+  channel Channel        @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  user    User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  viewer  ViewerProfile? @relation(fields: [viewerId], references: [id], onDelete: SetNull)
+
+  @@index([channelId, userId, endedAt])
+}
