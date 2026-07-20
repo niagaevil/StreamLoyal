@@ -1,4 +1,5 @@
 import { prisma, LedgerReason, Prisma } from "@streamloyal/db";
+import { InsufficientPointsError } from "./errors";
 
 export interface AwardPointsInput {
   channelId: string;
@@ -11,6 +12,34 @@ export interface AwardPointsInput {
   idempotencyKey?: string;
 }
 
+type Tx = Prisma.TransactionClient;
+
+/**
+ * Aplica delta + ledger dentro de um client de transação já aberto.
+ * Débito usa updateMany condicional para evitar saldo negativo em corrida.
+ */
+export async function applyPointsDelta(tx: Tx, input: AwardPointsInput) {
+  const updated = await tx.viewerProfile.updateMany({
+    where: {
+      id: input.viewerId,
+      ...(input.delta < 0 ? { points: { gte: -input.delta } } : {}),
+    },
+    data: { points: { increment: input.delta } },
+  });
+  if (updated.count !== 1) throw new InsufficientPointsError();
+  await tx.pointLedger.create({
+    data: {
+      channelId: input.channelId,
+      viewerId: input.viewerId,
+      delta: input.delta,
+      reason: input.reason,
+      refId: input.refId,
+      note: input.note,
+      idempotencyKey: input.idempotencyKey,
+    },
+  });
+}
+
 /**
  * Aplica uma variação de pontos com registro no ledger, de forma atômica.
  * Retorna false se a idempotencyKey já foi usada ou se o saldo ficaria negativo.
@@ -18,27 +47,7 @@ export interface AwardPointsInput {
 export async function awardPoints(input: AwardPointsInput): Promise<boolean> {
   try {
     await prisma.$transaction(async (tx) => {
-      // Decremento condicional: falha se o saldo ficaria negativo, mesmo com
-      // débitos concorrentes (evita a corrida ler-saldo → decrementar)
-      const updated = await tx.viewerProfile.updateMany({
-        where: {
-          id: input.viewerId,
-          ...(input.delta < 0 ? { points: { gte: -input.delta } } : {}),
-        },
-        data: { points: { increment: input.delta } },
-      });
-      if (updated.count !== 1) throw new Error("INSUFFICIENT_POINTS");
-      await tx.pointLedger.create({
-        data: {
-          channelId: input.channelId,
-          viewerId: input.viewerId,
-          delta: input.delta,
-          reason: input.reason,
-          refId: input.refId,
-          note: input.note,
-          idempotencyKey: input.idempotencyKey,
-        },
-      });
+      await applyPointsDelta(tx, input);
     });
     return true;
   } catch (err) {
@@ -49,7 +58,7 @@ export async function awardPoints(input: AwardPointsInput): Promise<boolean> {
     ) {
       return false;
     }
-    if (err instanceof Error && err.message === "INSUFFICIENT_POINTS") {
+    if (err instanceof InsufficientPointsError) {
       return false;
     }
     throw err;
@@ -77,7 +86,7 @@ export async function transferPoints(input: TransferPointsInput): Promise<boolea
         where: { id: input.fromViewerId, points: { gte: input.amount } },
         data: { points: { decrement: input.amount } },
       });
-      if (debited.count !== 1) throw new Error("INSUFFICIENT_POINTS");
+      if (debited.count !== 1) throw new InsufficientPointsError();
       await tx.viewerProfile.update({
         where: { id: input.toViewerId },
         data: { points: { increment: input.amount } },
@@ -103,7 +112,7 @@ export async function transferPoints(input: TransferPointsInput): Promise<boolea
     });
     return true;
   } catch (err) {
-    if (err instanceof Error && err.message === "INSUFFICIENT_POINTS") {
+    if (err instanceof InsufficientPointsError) {
       return false;
     }
     throw err;
@@ -168,7 +177,8 @@ export async function ensureViewer(input: EnsureViewerInput) {
 
 /**
  * Se houver pontos importados pendentes para o nome informado, credita-os via
- * ledger (idempotente) e remove a pendência. Retorna o perfil atualizado ou null.
+ * ledger (idempotente) e remove a pendência na mesma transação.
+ * Retorna o perfil atualizado ou null.
  */
 export async function applyPendingImport(
   channelId: string,
@@ -177,24 +187,34 @@ export async function applyPendingImport(
 ) {
   const nameKey = displayName.trim().toLowerCase();
   if (!nameKey) return null;
-  const pending = await prisma.pendingPointsImport.findUnique({
-    where: { channelId_nameKey: { channelId, nameKey } },
-  });
-  if (!pending) return null;
 
-  if (pending.points > 0) {
-    await awardPoints({
-      channelId,
-      viewerId,
-      delta: pending.points,
-      reason: "MANUAL",
-      note: `Importado do ${pending.source}`,
-      idempotencyKey: `import:${pending.source}:${channelId}:${nameKey}`,
+  return prisma.$transaction(async (tx) => {
+    const pending = await tx.pendingPointsImport.findUnique({
+      where: { channelId_nameKey: { channelId, nameKey } },
     });
-  }
-  await prisma.pendingPointsImport
-    .delete({ where: { id: pending.id } })
-    .catch(() => undefined);
+    if (!pending) return null;
 
-  return prisma.viewerProfile.findUnique({ where: { id: viewerId } });
+    const idempotencyKey = `import:${pending.source}:${channelId}:${nameKey}`;
+
+    if (pending.points > 0) {
+      // Evita P2002 no meio da txn (abortaria o delete): se já creditou, só limpa.
+      const already = await tx.pointLedger.findUnique({
+        where: { idempotencyKey },
+        select: { id: true },
+      });
+      if (!already) {
+        await applyPointsDelta(tx, {
+          channelId,
+          viewerId,
+          delta: pending.points,
+          reason: "MANUAL",
+          note: `Importado do ${pending.source}`,
+          idempotencyKey,
+        });
+      }
+    }
+
+    await tx.pendingPointsImport.delete({ where: { id: pending.id } });
+    return tx.viewerProfile.findUnique({ where: { id: viewerId } });
+  });
 }

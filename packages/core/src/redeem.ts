@@ -1,4 +1,5 @@
 import { prisma } from "@streamloyal/db";
+import { DomainError } from "./errors";
 
 export type RedeemResult =
   | { ok: true; redemptionId: string; code?: string }
@@ -7,9 +8,11 @@ export type RedeemResult =
 type RedeemErrorCode = Extract<RedeemResult, { ok: false }>["error"];
 
 /** Erro que aborta (e reverte) a transação após escritas parciais. */
-class RedeemAbort extends Error {
-  constructor(public readonly code: RedeemErrorCode) {
+class RedeemAbort extends DomainError {
+  declare readonly code: RedeemErrorCode;
+  constructor(code: RedeemErrorCode) {
     super(code);
+    this.name = "RedeemAbort";
   }
 }
 

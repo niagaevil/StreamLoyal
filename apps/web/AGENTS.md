@@ -25,7 +25,11 @@ ranking públicos (`/c/[slug]`), aba Assistir (`/c/[slug]/watch`), overlays OBS
   recebe a `Platform` do canal e resolve o `platformUserId` correto.
 - Overlays OBS: URLs contêm segredo cujo hash fica em `OverlayAccess`
   (`src/lib/overlay-token.ts`); validação em `/api/overlay/[token]/*`, revogável no painel.
-- Rate limiting de rotas públicas via `src/lib/rate-limit.ts` (Redis com fallback local).
+- Rate limiting de rotas públicas via `src/lib/rate-limit.ts` (Redis com fallback
+  em memória; o fallback faz sweep de chaves expiradas e limita o tamanho do Map
+  para evitar leak se o Redis cair).
+- No `signIn` (`auth.ts`), falhas ao buscar identidade YouTube/Twitch são logadas
+  com `console.warn` (login segue, mas sem `ytChannelId`/`twitchUserId`).
 - Componentes client que dependem de `window` (players, overlays) usam
   `useSyncExternalStore` para evitar mismatch de hidratação.
 - Headers de segurança globais em `next.config.ts`.

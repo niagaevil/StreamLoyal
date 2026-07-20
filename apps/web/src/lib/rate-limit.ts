@@ -3,6 +3,7 @@ import Redis from "ioredis";
 const globalState = globalThis as unknown as {
   redis?: Redis;
   memoryLimits?: Map<string, { count: number; expiresAt: number }>;
+  memoryLastSweep?: number;
 };
 
 export const redis =
@@ -21,6 +22,29 @@ const memory =
   new Map<string, { count: number; expiresAt: number }>();
 if (process.env.NODE_ENV !== "production") globalState.memoryLimits = memory;
 
+/** Evita crescimento ilimitado se o Redis ficar fora e chaves únicas acumulem. */
+const MEMORY_MAX_ENTRIES = 10_000;
+const MEMORY_SWEEP_INTERVAL_MS = 60_000;
+
+function sweepExpiredMemory(now: number) {
+  const lastSweep = globalState.memoryLastSweep ?? 0;
+  const overdue = now - lastSweep >= MEMORY_SWEEP_INTERVAL_MS;
+  const overCap = memory.size >= MEMORY_MAX_ENTRIES;
+  if (!overdue && !overCap) return;
+
+  globalState.memoryLastSweep = now;
+  for (const [key, entry] of memory) {
+    if (entry.expiresAt <= now) memory.delete(key);
+  }
+
+  if (memory.size <= MEMORY_MAX_ENTRIES) return;
+  const overflow = memory.size - MEMORY_MAX_ENTRIES;
+  const oldest = [...memory.entries()]
+    .sort((a, b) => a[1].expiresAt - b[1].expiresAt)
+    .slice(0, overflow);
+  for (const [key] of oldest) memory.delete(key);
+}
+
 export async function rateLimit(
   key: string,
   limit: number,
@@ -34,6 +58,7 @@ export async function rateLimit(
     return { allowed: count <= limit, remaining: Math.max(0, limit - count) };
   } catch {
     const now = Date.now();
+    sweepExpiredMemory(now);
     const current = memory.get(key);
     const entry =
       !current || current.expiresAt <= now

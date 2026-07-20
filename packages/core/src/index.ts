@@ -1,3 +1,4 @@
+export * from "./errors";
 export * from "./points";
 export * from "./redeem";
 export * from "./slug";

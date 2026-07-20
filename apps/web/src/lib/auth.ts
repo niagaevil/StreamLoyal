@@ -73,7 +73,13 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
             "https://www.googleapis.com/youtube/v3/channels?part=snippet&mine=true",
             { headers: { Authorization: `Bearer ${account.access_token}` } }
           );
-          if (!res.ok) return;
+          if (!res.ok) {
+            console.warn("[auth] YouTube channels API falhou no sign-in", {
+              userId: user.id,
+              status: res.status,
+            });
+            return;
+          }
           const data = (await res.json()) as {
             items?: { id: string }[];
           };
@@ -84,8 +90,12 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
               data: { ytChannelId: ch.id },
             });
           }
-        } catch {
-          // sem canal do YouTube — usuário ainda pode usar o site
+        } catch (err) {
+          // Usuário ainda pode usar o site; sem ytChannelId não vincula pontos YT.
+          console.warn("[auth] falha ao vincular identidade YouTube no sign-in", {
+            userId: user.id,
+            error: err instanceof Error ? err.message : String(err),
+          });
         }
       }
 
@@ -97,7 +107,13 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
               "Client-Id": process.env.AUTH_TWITCH_ID!,
             },
           });
-          if (!res.ok) return;
+          if (!res.ok) {
+            console.warn("[auth] Twitch users API falhou no sign-in", {
+              userId: user.id,
+              status: res.status,
+            });
+            return;
+          }
           const data = (await res.json()) as {
             data?: { id: string; login: string }[];
           };
@@ -108,8 +124,12 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
               data: { twitchUserId: tw.id, twitchLogin: tw.login },
             });
           }
-        } catch {
-          // segue sem identidade Twitch
+        } catch (err) {
+          // Login segue; sem twitchUserId o viewer não associa pontos do chat.
+          console.warn("[auth] falha ao vincular identidade Twitch no sign-in", {
+            userId: user.id,
+            error: err instanceof Error ? err.message : String(err),
+          });
         }
       }
     },

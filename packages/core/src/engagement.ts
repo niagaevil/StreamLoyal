@@ -1,4 +1,5 @@
 import { LedgerReason, Prisma, prisma } from "@streamloyal/db";
+import { DomainError, InsufficientPointsError, matchDomainCode } from "./errors";
 
 type Tx = Prisma.TransactionClient;
 
@@ -19,7 +20,7 @@ async function applyDelta(
       where: { id: input.viewerId, points: { gte: -input.delta } },
       data: { points: { increment: input.delta } },
     });
-    if (updated.count !== 1) throw new Error("INSUFFICIENT_POINTS");
+    if (updated.count !== 1) throw new InsufficientPointsError();
   } else {
     await tx.viewerProfile.update({
       where: { id: input.viewerId },
@@ -85,7 +86,7 @@ export async function playChanceGame(input: {
           points: { gte: amount },
         },
       });
-      if (eligible !== 1) throw new Error("INSUFFICIENT_POINTS");
+      if (eligible !== 1) throw new InsufficientPointsError();
       await applyDelta(tx, {
         channelId: input.channelId,
         viewerId: input.viewerId,
@@ -97,7 +98,7 @@ export async function playChanceGame(input: {
     });
     return { ok: true as const, won, delta, grossPrize };
   } catch (error) {
-    if (error instanceof Error && error.message === "INSUFFICIENT_POINTS") {
+    if (error instanceof InsufficientPointsError) {
       return { ok: false as const, error: "INSUFFICIENT_POINTS" as const };
     }
     if (
@@ -134,7 +135,7 @@ export async function playDuel(input: {
         data: { points: { increment: amount } },
       });
       if (loser.count !== 1 || winner.count !== 1) {
-        throw new Error("INSUFFICIENT_POINTS");
+        throw new InsufficientPointsError();
       }
       await tx.pointLedger.createMany({
         data: [
@@ -157,7 +158,7 @@ export async function playDuel(input: {
     });
     return { ok: true as const, winnerId, loserId, amount };
   } catch (error) {
-    if (error instanceof Error && error.message === "INSUFFICIENT_POINTS") {
+    if (error instanceof InsufficientPointsError) {
       return { ok: false as const, error: "INSUFFICIENT_POINTS" as const };
     }
     if (
@@ -181,7 +182,7 @@ export async function enterGiveaway(input: {
       const giveaway = await tx.giveaway.findUniqueOrThrow({
         where: { id: input.giveawayId },
       });
-      if (giveaway.status !== "OPEN") throw new Error("CLOSED");
+      if (giveaway.status !== "OPEN") throw new DomainError("CLOSED");
 
       const current = await tx.giveawayEntry.findUnique({
         where: {
@@ -193,7 +194,7 @@ export async function enterGiveaway(input: {
       });
       const available = giveaway.maxTickets - (current?.tickets ?? 0);
       const tickets = Math.min(Math.max(1, Math.floor(input.tickets)), available);
-      if (tickets <= 0) throw new Error("MAX_TICKETS");
+      if (tickets <= 0) throw new DomainError("MAX_TICKETS");
 
       const viewer = await tx.viewerProfile.findUniqueOrThrow({
         where: { id: input.viewerId },
@@ -222,10 +223,12 @@ export async function enterGiveaway(input: {
       return { ok: true as const, tickets, cost };
     });
   } catch (error) {
-    const known = ["CLOSED", "MAX_TICKETS", "INSUFFICIENT_POINTS"];
-    if (error instanceof Error && known.includes(error.message)) {
-      return { ok: false as const, error: error.message };
-    }
+    const code = matchDomainCode(error, [
+      "CLOSED",
+      "MAX_TICKETS",
+      "INSUFFICIENT_POINTS",
+    ] as const);
+    if (code) return { ok: false as const, error: code };
     if (
       error instanceof Prisma.PrismaClientKnownRequestError &&
       error.code === "P2002"
@@ -242,13 +245,13 @@ export async function drawGiveaway(giveawayId: string, random = Math.random()) {
       where: { id: giveawayId },
       include: { entries: { include: { viewer: true } } },
     });
-    if (giveaway.status !== "OPEN") throw new Error("CLOSED");
+    if (giveaway.status !== "OPEN") throw new DomainError("CLOSED");
     const weighted = giveaway.entries.map((entry) => ({
       entry,
       weight: entry.tickets * Math.max(1, entry.weight),
     }));
     const total = weighted.reduce((sum, item) => sum + item.weight, 0);
-    if (total <= 0) throw new Error("NO_ENTRIES");
+    if (total <= 0) throw new DomainError("NO_ENTRIES");
     const selected = weighted[selectWeightedIndex(weighted.map((item) => item.weight), random)];
     const claimed = await tx.giveaway.updateMany({
       where: { id: giveawayId, status: "OPEN" },
@@ -258,7 +261,7 @@ export async function drawGiveaway(giveawayId: string, random = Math.random()) {
         endedAt: new Date(),
       },
     });
-    if (claimed.count !== 1) throw new Error("CLOSED");
+    if (claimed.count !== 1) throw new DomainError("CLOSED");
     return selected.entry.viewer;
   });
 }
@@ -270,7 +273,7 @@ export async function votePoll(input: {
 }) {
   return prisma.$transaction(async (tx) => {
     const poll = await tx.poll.findUniqueOrThrow({ where: { id: input.pollId } });
-    if (poll.status !== "OPEN") throw new Error("CLOSED");
+    if (poll.status !== "OPEN") throw new DomainError("CLOSED");
     const option = await tx.pollOption.findUniqueOrThrow({
       where: {
         pollId_number: { pollId: poll.id, number: input.optionNumber },
@@ -298,7 +301,7 @@ export async function placeBet(input: {
       const round = await tx.bettingRound.findUniqueOrThrow({
         where: { id: input.roundId },
       });
-      if (round.status !== "OPEN") throw new Error("CLOSED");
+      if (round.status !== "OPEN") throw new DomainError("CLOSED");
       const option = await tx.bettingOption.findUniqueOrThrow({
         where: {
           roundId_number: { roundId: round.id, number: input.optionNumber },
@@ -307,7 +310,7 @@ export async function placeBet(input: {
       const exists = await tx.bet.findUnique({
         where: { roundId_viewerId: { roundId: round.id, viewerId: input.viewerId } },
       });
-      if (exists) throw new Error("ALREADY_BET");
+      if (exists) throw new DomainError("ALREADY_BET");
       await applyDelta(tx, {
         channelId: round.channelId,
         viewerId: input.viewerId,
@@ -327,10 +330,12 @@ export async function placeBet(input: {
       return { ok: true as const, option, amount };
     });
   } catch (error) {
-    const known = ["CLOSED", "ALREADY_BET", "INSUFFICIENT_POINTS"];
-    if (error instanceof Error && known.includes(error.message)) {
-      return { ok: false as const, error: error.message };
-    }
+    const code = matchDomainCode(error, [
+      "CLOSED",
+      "ALREADY_BET",
+      "INSUFFICIENT_POINTS",
+    ] as const);
+    if (code) return { ok: false as const, error: code };
     if (
       error instanceof Prisma.PrismaClientKnownRequestError &&
       error.code === "P2002"
@@ -347,7 +352,7 @@ export async function settleBettingRound(roundId: string, optionNumber: number) 
       where: { id: roundId },
       include: { bets: true },
     });
-    if (round.status !== "OPEN") throw new Error("CLOSED");
+    if (round.status !== "OPEN") throw new DomainError("CLOSED");
     const winner = await tx.bettingOption.findUniqueOrThrow({
       where: { roundId_number: { roundId, number: optionNumber } },
     });
@@ -355,7 +360,7 @@ export async function settleBettingRound(roundId: string, optionNumber: number) 
       where: { id: round.id, status: "OPEN" },
       data: { status: "CLOSED", winnerOptionId: winner.id, endedAt: new Date() },
     });
-    if (claimed.count !== 1) throw new Error("CLOSED");
+    if (claimed.count !== 1) throw new DomainError("CLOSED");
     const pot = round.bets.reduce((sum, bet) => sum + bet.amount, 0);
     const winningBets = round.bets.filter((bet) => bet.optionId === winner.id);
     const winningPool = winningBets.reduce((sum, bet) => sum + bet.amount, 0);
@@ -395,11 +400,13 @@ export async function queueMedia(input: {
       const settings = await tx.mediaSettings.findUniqueOrThrow({
         where: { channelId: input.channelId },
       });
-      if (!settings.enabled) throw new Error("DISABLED");
-      if (!/^[A-Za-z0-9_-]{11}$/.test(input.videoId)) throw new Error("INVALID_URL");
+      if (!settings.enabled) throw new DomainError("DISABLED");
+      if (!/^[A-Za-z0-9_-]{11}$/.test(input.videoId)) {
+        throw new DomainError("INVALID_URL");
+      }
       const lowerUrl = input.url.toLowerCase();
       if (settings.blacklist.some((entry) => lowerUrl.includes(entry.toLowerCase()))) {
-        throw new Error("BLACKLISTED");
+        throw new DomainError("BLACKLISTED");
       }
       const queued = await tx.mediaQueueItem.count({
         where: {
@@ -407,7 +414,7 @@ export async function queueMedia(input: {
           status: { in: ["PENDING", "PLAYING"] },
         },
       });
-      if (queued >= settings.maxQueueSize) throw new Error("QUEUE_FULL");
+      if (queued >= settings.maxQueueSize) throw new DomainError("QUEUE_FULL");
       await applyDelta(tx, {
         channelId: input.channelId,
         viewerId: input.viewerId,
@@ -428,16 +435,14 @@ export async function queueMedia(input: {
       return { ok: true as const, item };
     });
   } catch (error) {
-    const known = [
+    const code = matchDomainCode(error, [
       "DISABLED",
       "INVALID_URL",
       "BLACKLISTED",
       "QUEUE_FULL",
       "INSUFFICIENT_POINTS",
-    ];
-    if (error instanceof Error && known.includes(error.message)) {
-      return { ok: false as const, error: error.message };
-    }
+    ] as const);
+    if (code) return { ok: false as const, error: code };
     if (
       error instanceof Prisma.PrismaClientKnownRequestError &&
       error.code === "P2002"
@@ -460,7 +465,7 @@ export async function voteSkipMedia(input: {
       where: { channelId: input.channelId, status: "PLAYING" },
       orderBy: { createdAt: "asc" },
     });
-    if (!item) throw new Error("NOT_PLAYING");
+    if (!item) throw new DomainError("NOT_PLAYING");
     await tx.mediaSkipVote.create({
       data: { itemId: item.id, viewerId: input.viewerId },
     });
